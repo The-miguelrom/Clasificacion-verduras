@@ -21,7 +21,7 @@ Este repositorio propone y deja **implementado un MVP funcional** para una empre
   - `podrido_rajadura`.
 - Clasificación de calibre `S/M/L` por tamaño aparente; opción de calibración a cm con **marcador ArUco**.
 - Trazabilidad completa por lote (metadatos + imagen original y anotada + confianza + usuario).
-- API mínima operativa (`/inspect`, `/inspections`, `/reports`) con FastAPI.
+- API operativa (`/inspect`, `/inspect-file`, `/inspections`, `/reports`) con FastAPI.
 
 ### Fuera de alcance (fase posterior)
 - Control de robots/actuadores para descarte automático.
@@ -58,16 +58,16 @@ Este repositorio propone y deja **implementado un MVP funcional** para una empre
 [Cámara fija USB/IP]
         |
         v
-[Servicio de Captura: OpenCV/GStreamer]
+[Servicio de Captura: OpenCV/GStreamer] (app/camera_worker.py)
         |
         v
-[Backend API FastAPI]
+[Backend API FastAPI] (app/main.py)
    |        |         \
    |        |          -> [Almacenamiento imágenes: local/NAS/S3]
    |        v
    |   [Servicio de Inferencia IA]
-   |      - YOLOv8/YOLOv8-seg (defectos)
-   |      - Regla de negocio + calibre
+   |      - Heurística OpenCV (MVP funcional)
+   |      - Reglas de negocio + calibre
    |
    v
 [PostgreSQL/MySQL]
@@ -157,7 +157,7 @@ Este repositorio propone y deja **implementado un MVP funcional** para una empre
 1. Operario inicia sesión.
 2. Selecciona o crea lote (`lote`, `proveedor`, `producto=tomate`).
 3. Coloca tomate en marca de posición de la estación.
-4. Sistema captura imagen (o recibe imagen desde endpoint).
+4. Sistema captura imagen (tecla ESPACIO o trigger externo).
 5. Servicio IA detecta defectos y estima calibre.
 6. Reglas de negocio consolidan resultado final `A/B/C`.
 7. UI muestra imagen anotada + defectos + confianza + calibre.
@@ -221,11 +221,21 @@ Este repositorio propone y deja **implementado un MVP funcional** para una empre
 ## 8) API mínima
 
 ### `POST /inspect`
-Entrada (multipart o JSON + imagen):
+Entrada JSON:
 - `lot_code`, `supplier_name`, `product`, `username`
-- `captured_image` (archivo opcional)
 - `manual_size_px` (opcional para demo)
 - `detected_defects` (opcional para pruebas sin modelo)
+
+Salida:
+- `quality_class`, `size_class`, `confidence`
+- `defects[]`
+- `annotated_image_path`
+- `inspection_id`
+
+### `POST /inspect-file` (integración con cámara)
+Entrada multipart/form-data:
+- `lot_code`, `supplier_name`, `username`, `product`
+- `image` (archivo JPG/PNG)
 
 Salida:
 - `quality_class`, `size_class`, `confidence`
@@ -309,7 +319,7 @@ Salida:
 ### Stack MVP recomendado
 - **Captura:** OpenCV (Python) con soporte USB/IP.
 - **Backend/API:** FastAPI.
-- **IA:** Ultralytics YOLOv8 (`n` o `s`) + reglas de negocio.
+- **IA:** Heurística OpenCV en esta versión + migración posterior a Ultralytics YOLOv8.
 - **DB:** PostgreSQL (o SQLite para demo local).
 - **Dashboard:** Metabase conectado a PostgreSQL.
 - **Storage:** carpeta local/NAS; opcional MinIO/S3.
@@ -332,12 +342,13 @@ Salida:
 
 ## Implementación funcional incluida en este repositorio
 
-Se incluye una API FastAPI ejecutable que simula (y permite integrar) el flujo de inspección:
+Se incluye una API FastAPI ejecutable y un worker de cámara para flujo de inspección real:
 
 - Reglas A/B/C implementadas.
 - Clasificación de calibre S/M/L.
 - Persistencia de inspecciones en SQLite.
-- Endpoints `/inspect`, `/inspections`, `/reports`.
+- Endpoints `/inspect`, `/inspect-file`, `/inspections`, `/reports`.
+- Script `app/camera_worker.py` para capturar desde USB/IP y enviar la imagen automáticamente.
 
 ### Ejecución rápida
 
@@ -347,6 +358,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
+
+En otra terminal:
+
+```bash
+python app/camera_worker.py --lot L-001 --supplier "Finca Norte" --username operario1 --camera 0
+```
+
+- Presiona `ESPACIO` para capturar + inspeccionar.
+- Presiona `q` para salir.
 
 Documentación interactiva:
 - `http://127.0.0.1:8000/docs`

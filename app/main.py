@@ -1,10 +1,13 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from sqlalchemy import JSON, DateTime, Float, Integer, String, create_engine, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+
+from app.rules import infer_quality, infer_size
+from app.schemas import DefectInput, InspectRequest, InspectResponse
+from app.vision import annotate_image, detect_defects_basic, estimate_size_px, load_image_from_bytes, save_upload
 
 
 class Base(DeclarativeBase):
@@ -32,54 +35,38 @@ engine = create_engine("sqlite:///./mvp.db", future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base.metadata.create_all(engine)
 
-
-class DefectInput(BaseModel):
-    code: Literal["mancha", "magulladura", "podrido_rajadura"]
-    score: float = Field(ge=0, le=1)
+app = FastAPI(title="MVP Clasificación Tomate", version="0.2.0")
 
 
-class InspectRequest(BaseModel):
-    lot_code: str
-    supplier_name: str
-    product: str = "tomate"
-    username: str
-    manual_size_px: int = Field(default=180, ge=1)
-    detected_defects: list[DefectInput] = Field(default_factory=list)
-    original_image_path: str | None = None
-
-
-class InspectResponse(BaseModel):
-    inspection_id: int
-    quality_class: Literal["A", "B", "C"]
-    size_class: Literal["S", "M", "L"]
-    confidence: float
-    defects: list[DefectInput]
-    annotated_image_path: str
-
-
-def infer_size(size_px: int) -> Literal["S", "M", "L"]:
-    if size_px < 130:
-        return "S"
-    if size_px <= 220:
-        return "M"
-    return "L"
-
-
-def infer_quality(defects: list[DefectInput], size_class: str) -> tuple[Literal["A", "B", "C"], float, str]:
-    if any(d.code == "podrido_rajadura" and d.score >= 0.35 for d in defects):
-        return "C", 0.93, "Regla: podredumbre/rajadura detectada"
-
-    medium_defect = any(d.code in {"mancha", "magulladura"} and d.score >= 0.40 for d in defects)
-    if medium_defect:
-        return "B", 0.82, "Regla: defecto moderado visible"
-
-    if size_class in {"M", "L"} and len(defects) == 0:
-        return "A", 0.90, "Regla: sin defectos y tamaño en rango"
-
-    return "B", 0.68, "Regla: condición intermedia"
-
-
-app = FastAPI(title="MVP Clasificación Tomate", version="0.1.0")
+def persist_inspection(
+    lot_code: str,
+    supplier_name: str,
+    product: str,
+    username: str,
+    quality_class: str,
+    size_class: str,
+    confidence: float,
+    defects: list[DefectInput],
+    original_image_path: str | None,
+    annotated_image_path: str,
+) -> int:
+    with SessionLocal() as session:
+        row = Inspection(
+            lot_code=lot_code,
+            supplier_name=supplier_name,
+            product=product,
+            username=username,
+            quality_class=quality_class,
+            size_class=size_class,
+            confidence=confidence,
+            defects=[d.model_dump() for d in defects],
+            original_image_path=original_image_path,
+            annotated_image_path=annotated_image_path,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return row.id
 
 
 @app.get("/health")
@@ -91,31 +78,77 @@ def health() -> dict[str, str]:
 def inspect(payload: InspectRequest) -> InspectResponse:
     size_class = infer_size(payload.manual_size_px)
     quality_class, confidence, _reason = infer_quality(payload.detected_defects, size_class)
-    annotated_path = f"annotations/{payload.lot_code}_{datetime.utcnow().timestamp():.0f}.jpg"
+    file_stem = f"{payload.lot_code}_{datetime.utcnow().timestamp():.0f}"
+    annotated_path = f"annotations/{file_stem}.jpg"
 
-    with SessionLocal() as session:
-        row = Inspection(
-            lot_code=payload.lot_code,
-            supplier_name=payload.supplier_name,
-            product=payload.product,
-            username=payload.username,
-            quality_class=quality_class,
-            size_class=size_class,
-            confidence=confidence,
-            defects=[d.model_dump() for d in payload.detected_defects],
-            original_image_path=payload.original_image_path,
-            annotated_image_path=annotated_path,
-        )
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-
-    return InspectResponse(
-        inspection_id=row.id,
+    inspection_id = persist_inspection(
+        lot_code=payload.lot_code,
+        supplier_name=payload.supplier_name,
+        product=payload.product,
+        username=payload.username,
         quality_class=quality_class,
         size_class=size_class,
         confidence=confidence,
         defects=payload.detected_defects,
+        original_image_path=payload.original_image_path,
+        annotated_image_path=annotated_path,
+    )
+
+    return InspectResponse(
+        inspection_id=inspection_id,
+        quality_class=quality_class,
+        size_class=size_class,
+        confidence=confidence,
+        defects=payload.detected_defects,
+        annotated_image_path=annotated_path,
+    )
+
+
+@app.post("/inspect-file", response_model=InspectResponse)
+async def inspect_file(
+    lot_code: str = Form(...),
+    supplier_name: str = Form(...),
+    username: str = Form(...),
+    product: str = Form("tomate"),
+    image: UploadFile = File(...),
+) -> InspectResponse:
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Archivo inválido: debe ser imagen")
+
+    image_bytes = await image.read()
+    file_stem = f"{lot_code}_{datetime.utcnow().timestamp():.0f}"
+    original_path = str(save_upload(image_bytes, file_stem))
+
+    try:
+        frame = load_image_from_bytes(image_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    size_px = estimate_size_px(frame)
+    defects = detect_defects_basic(frame)
+    size_class = infer_size(size_px)
+    quality_class, confidence, _reason = infer_quality(defects, size_class)
+    annotated_path = annotate_image(frame, quality_class, size_class, defects, file_stem)
+
+    inspection_id = persist_inspection(
+        lot_code=lot_code,
+        supplier_name=supplier_name,
+        product=product,
+        username=username,
+        quality_class=quality_class,
+        size_class=size_class,
+        confidence=confidence,
+        defects=defects,
+        original_image_path=original_path,
+        annotated_image_path=annotated_path,
+    )
+
+    return InspectResponse(
+        inspection_id=inspection_id,
+        quality_class=quality_class,
+        size_class=size_class,
+        confidence=confidence,
+        defects=defects,
         annotated_image_path=annotated_path,
     )
 
