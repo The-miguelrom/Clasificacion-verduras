@@ -349,6 +349,7 @@ Se incluye una API FastAPI ejecutable y un worker de cámara para flujo de inspe
 - Persistencia de inspecciones en SQLite.
 - Endpoints `/inspect`, `/inspect-file`, `/inspections`, `/reports`.
 - Script `app/camera_worker.py` para capturar desde USB/IP y enviar la imagen automáticamente.
+- Web UI en `http://127.0.0.1:8000/` con botón **Abrir cámara** y captura desde navegador.
 
 ### Ejecución rápida
 
@@ -370,3 +371,8 @@ python app/camera_worker.py --lot L-001 --supplier "Finca Norte" --username oper
 
 Documentación interactiva:
 - `http://127.0.0.1:8000/docs`
+
+Aplicación web (UI de inspección):
+- `http://127.0.0.1:8000/`
+- Botón **Abrir cámara** para iniciar `getUserMedia` desde navegador.
+- Botón **Capturar e inspeccionar** para enviar imagen a `/inspect-file`.

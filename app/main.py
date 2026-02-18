@@ -2,12 +2,14 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import JSON, DateTime, Float, Integer, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.rules import infer_quality, infer_size
 from app.schemas import DefectInput, InspectRequest, InspectResponse
 from app.vision import annotate_image, detect_defects_basic, estimate_size_px, load_image_from_bytes, save_upload
+from app.web_ui import build_ui_html
 
 
 class Base(DeclarativeBase):
@@ -36,6 +38,8 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 Base.metadata.create_all(engine)
 
 app = FastAPI(title="MVP Clasificación Tomate", version="0.2.0")
+app.mount("/annotations", StaticFiles(directory="annotations"), name="annotations")
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 def persist_inspection(
@@ -72,6 +76,11 @@ def persist_inspection(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+def web_app():
+    return build_ui_html()
 
 
 @app.post("/inspect", response_model=InspectResponse)
